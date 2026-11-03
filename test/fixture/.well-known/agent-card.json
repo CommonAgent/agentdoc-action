@@ -1,0 +1,27 @@
+{
+  "protocolVersion": "0.3.0",
+  "name": "Test Echo Agent",
+  "description": "A small test agent that repeats back what it is sent. It exists only to test the AgentDoc Action.",
+  "url": "http://localhost:8787/a2a",
+  "preferredTransport": "JSONRPC",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "The Common Agent Standards authors",
+    "url": "https://agentdoc.net"
+  },
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "echo",
+      "name": "Echo",
+      "description": "Repeats back the text it is sent.",
+      "tags": ["test", "echo"],
+      "examples": ["hello"]
+    }
+  ]
+}

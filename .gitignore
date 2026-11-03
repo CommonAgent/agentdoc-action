@@ -1,0 +1,5 @@
+test-out/
+test-out-nocheck/
+_common-agent-ts/
+node_modules/
+*.tgz

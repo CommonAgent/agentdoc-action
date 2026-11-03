@@ -1,0 +1,194 @@
+name: self-test
+
+# Runs the Action against a small test agent served on localhost.
+#
+# The "from source" job packs @common-agent/agentdoc from
+# CommonAgent/common-agent-ts and runs the Action with that tarball, so it
+# works before a release is on npm. The "from npm" job runs the Action the way
+# a user does, and skips while the package is not on npm yet.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      common-agent-ts-ref:
+        description: The branch or tag of CommonAgent/common-agent-ts to pack the package from.
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  from-source:
+    name: from source
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check out the package source
+        uses: actions/checkout@v4
+        with:
+          repository: CommonAgent/common-agent-ts
+          ref: ${{ inputs.common-agent-ts-ref || 'main' }}
+          path: _common-agent-ts
+
+      - name: Pack the package
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f _common-agent-ts/packages/agentdoc/package.json ]; then
+            echo "::notice::packages/agentdoc is not in CommonAgent/common-agent-ts at this ref yet, so there is no tarball to test with. Skipping the self-test."
+            echo "tarball=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cd _common-agent-ts
+          npm ci
+          npm run build
+          mkdir -p "$RUNNER_TEMP/pkg"
+          npm pack -w packages/agentdoc --pack-destination "$RUNNER_TEMP/pkg"
+          tarball="$(ls "$RUNNER_TEMP"/pkg/*.tgz | head -n 1)"
+          echo "Packed $tarball"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Serve the test agent's card on localhost
+        if: steps.pack.outputs.tarball != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup node test/serve.mjs test/fixture 8787 > "$RUNNER_TEMP/serve.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8787/.well-known/agent-card.json > /dev/null; then
+              echo "The test agent is up."
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/serve.log"
+          echo "::error::The test server did not start."
+          exit 1
+
+      - name: Run the Action
+        id: run
+        if: steps.pack.outputs.tarball != ''
+        uses: ./
+        with:
+          address: http://localhost:8787
+          out: test-out
+          package: ${{ steps.pack.outputs.tarball }}
+
+      - name: The Action wrote a passing AgentDoc and its page
+        if: steps.pack.outputs.tarball != ''
+        shell: bash
+        env:
+          DOC: ${{ steps.run.outputs.agentdoc-path }}
+          PAGE: ${{ steps.run.outputs.page-path }}
+          OK: ${{ steps.run.outputs.ok }}
+        run: |
+          set -euo pipefail
+          test "$DOC" = "test-out/.well-known/agentdoc.json"
+          test "$PAGE" = "test-out/agentdoc.html"
+          test "$OK" = "true"
+          node -e '
+            const doc = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            if (doc.agentdoc !== "v1") throw new Error("agentdoc is not v1");
+            if (!doc.assembled_at) throw new Error("assembled_at is missing");
+            if (!Array.isArray(doc.sources) || doc.sources.length === 0) throw new Error("no sources listed");
+            console.log("AgentDoc v1 with " + doc.sources.length + " source(s), assembled at " + doc.assembled_at);
+          ' "$DOC"
+          grep -qi "Test Echo Agent" "$PAGE"
+          echo "The page names the test agent."
+
+      - name: Run the Action with the check turned off
+        id: nocheck
+        if: steps.pack.outputs.tarball != ''
+        uses: ./
+        with:
+          address: http://localhost:8787
+          out: test-out-nocheck
+          check: "false"
+          package: ${{ steps.pack.outputs.tarball }}
+
+      - name: The check was skipped and the files were still written
+        if: steps.pack.outputs.tarball != ''
+        shell: bash
+        env:
+          DOC: ${{ steps.nocheck.outputs.agentdoc-path }}
+          PAGE: ${{ steps.nocheck.outputs.page-path }}
+          OK: ${{ steps.nocheck.outputs.ok }}
+        run: |
+          set -euo pipefail
+          test -s "$DOC"
+          test -s "$PAGE"
+          test -z "$OK"
+          echo "Wrote $DOC and $PAGE without checking."
+
+  from-npm:
+    name: from npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Is the package on npm?
+        id: npm
+        shell: bash
+        run: |
+          if npm view @common-agent/agentdoc version > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::@common-agent/agentdoc is not on npm yet. Skipping the npm self-test."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Serve the test agent's card on localhost
+        if: steps.npm.outputs.published == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup node test/serve.mjs test/fixture 8787 > "$RUNNER_TEMP/serve.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8787/.well-known/agent-card.json > /dev/null; then
+              echo "The test agent is up."
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/serve.log"
+          echo "::error::The test server did not start."
+          exit 1
+
+      - name: Run the Action
+        id: run
+        if: steps.npm.outputs.published == 'true'
+        uses: ./
+        with:
+          address: http://localhost:8787
+
+      - name: The Action wrote a passing AgentDoc and its page
+        if: steps.npm.outputs.published == 'true'
+        shell: bash
+        env:
+          DOC: ${{ steps.run.outputs.agentdoc-path }}
+          PAGE: ${{ steps.run.outputs.page-path }}
+          OK: ${{ steps.run.outputs.ok }}
+        run: |
+          set -euo pipefail
+          test "$DOC" = ".well-known/agentdoc.json"
+          test "$PAGE" = "agentdoc.html"
+          test "$OK" = "true"
+          test -s "$DOC"
+          test -s "$PAGE"
+          echo "Wrote $DOC and $PAGE, and the check passed."

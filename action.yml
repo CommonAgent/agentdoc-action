@@ -1,0 +1,152 @@
+name: Build and check an AgentDoc
+description: Build your agent's AgentDoc from its address and check it, so the file you publish always matches your agent.
+author: The Common Agent Standards authors
+
+branding:
+  icon: file-text
+  color: blue
+
+inputs:
+  address:
+    description: Your agent's address, such as https://my-agent.example.com. The AgentDoc is built from what your agent publishes there.
+    required: true
+  descriptor:
+    description: Path or URL of your agent's Descriptor, if it is not served at your address.
+    required: false
+    default: ""
+  out:
+    description: The folder to write into. The AgentDoc goes to <out>/.well-known/agentdoc.json and the page to <out>/agentdoc.html.
+    required: false
+    default: "."
+  check:
+    description: Check the AgentDoc after building it, and fail the step if the check fails.
+    required: false
+    default: "true"
+  version:
+    description: The version of @common-agent/agentdoc to run.
+    required: false
+    default: latest
+  package:
+    description: For testing this Action only. A path or URL to a package tarball to run in place of @common-agent/agentdoc from npm.
+    required: false
+    default: ""
+
+outputs:
+  agentdoc-path:
+    description: The path of the AgentDoc that was written.
+    value: ${{ steps.build.outputs.agentdoc-path }}
+  page-path:
+    description: The path of the HTML page that was written.
+    value: ${{ steps.build.outputs.page-path }}
+  ok:
+    description: "\"true\" when the AgentDoc passed the check, \"false\" when it did not. Empty when check is false."
+    value: ${{ steps.check.outputs.ok }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build the AgentDoc
+      id: build
+      shell: bash
+      env:
+        INPUT_ADDRESS: ${{ inputs.address }}
+        INPUT_DESCRIPTOR: ${{ inputs.descriptor }}
+        INPUT_OUT: ${{ inputs.out }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_PACKAGE: ${{ inputs.package }}
+      run: |
+        set -euo pipefail
+
+        if ! command -v node >/dev/null 2>&1; then
+          echo "::error::This Action needs Node.js 20.10 or later. Add actions/setup-node before it."
+          exit 1
+        fi
+        if ! node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>20||(a===20&&b>=10)?0:1)'; then
+          echo "::error::This Action needs Node.js 20.10 or later, and this runner has $(node --version). Add actions/setup-node before it."
+          exit 1
+        fi
+
+        if [ -z "$INPUT_ADDRESS" ]; then
+          echo "::error::The address input is empty. Set it to your agent's address."
+          exit 1
+        fi
+
+        if [ -n "$INPUT_PACKAGE" ]; then
+          pkg="$INPUT_PACKAGE"
+          if [ -f "$pkg" ]; then
+            pkg="$(cd "$(dirname "$pkg")" && pwd)/$(basename "$pkg")"
+          fi
+          echo "Running the package at $pkg in place of the npm release."
+        else
+          pkg="@common-agent/agentdoc@${INPUT_VERSION:-latest}"
+        fi
+
+        out="${INPUT_OUT:-.}"
+        args=(build "$INPUT_ADDRESS" --out "$out")
+        if [ -n "$INPUT_DESCRIPTOR" ]; then
+          args+=(--descriptor "$INPUT_DESCRIPTOR")
+        fi
+
+        echo "Building the AgentDoc for $INPUT_ADDRESS"
+        npx -y --package "$pkg" -- common-agent-doc "${args[@]}"
+
+        base="${out%/}"
+        if [ -z "$base" ]; then base="/"; fi
+        doc="$base/.well-known/agentdoc.json"
+        page="$base/agentdoc.html"
+        doc="${doc#./}"
+        page="${page#./}"
+
+        for f in "$doc" "$page"; do
+          if [ ! -s "$f" ]; then
+            echo "::error::The build finished but did not write $f."
+            exit 1
+          fi
+        done
+
+        delim="EOF_$RANDOM$RANDOM$RANDOM"
+        {
+          echo "agentdoc-path<<$delim"; echo "$doc"; echo "$delim"
+          echo "page-path<<$delim"; echo "$page"; echo "$delim"
+          echo "package<<$delim"; echo "$pkg"; echo "$delim"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "Wrote $doc"
+        echo "Wrote $page"
+
+    - name: Check the AgentDoc
+      id: check
+      if: inputs.check == 'true'
+      shell: bash
+      env:
+        AGENTDOC_PATH: ${{ steps.build.outputs.agentdoc-path }}
+        PACKAGE_SPEC: ${{ steps.build.outputs.package }}
+      run: |
+        set -uo pipefail
+
+        echo "Checking $AGENTDOC_PATH"
+        report="$(mktemp)"
+        npx -y --package "$PACKAGE_SPEC" -- common-agent-doc check "$AGENTDOC_PATH" 2>&1 | tee "$report"
+        status="${PIPESTATUS[0]}"
+
+        if [ "$status" = "0" ]; then
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          echo "The AgentDoc passed the check."
+          exit 0
+        fi
+
+        if [ "$status" = "1" ]; then
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### The AgentDoc did not pass the check"
+            echo
+            echo '```'
+            cat "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error file=$AGENTDOC_PATH::The AgentDoc did not pass the check. The findings are listed above."
+          exit 1
+        fi
+
+        echo "::error::The check could not run (exit code $status). The messages above say why."
+        exit "$status"

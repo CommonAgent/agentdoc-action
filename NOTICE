@@ -1,0 +1,8 @@
+AgentDoc GitHub Action
+Copyright 2026 The Common Agent Standards authors
+
+This product is licensed under the Apache License, Version 2.0 (LICENSE).
+
+It runs the @common-agent/agentdoc package
+(https://www.npmjs.com/package/@common-agent/agentdoc), which is part of the
+Common Agent Standards tools and is also licensed under Apache-2.0.
