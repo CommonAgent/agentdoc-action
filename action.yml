@@ -122,7 +122,7 @@ runs:
         AGENTDOC_PATH: ${{ steps.build.outputs.agentdoc-path }}
         PACKAGE_SPEC: ${{ steps.build.outputs.package }}
       run: |
-        set -uo pipefail
+        set +e -uo pipefail
 
         echo "Checking $AGENTDOC_PATH"
         report="$(mktemp)"
